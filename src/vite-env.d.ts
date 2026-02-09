@@ -8,6 +8,37 @@ import type {
 } from './shared/provider-config';
 
 declare global {
+  type TextAssistConfig = {
+    enabled: boolean;
+    debugLogging: boolean;
+    trigger: {
+      mode: 'triple-space' | 'hotkey';
+      hotkey: string;
+      tripleSpaceWindowMs: number;
+    };
+    selection: {
+      enableClipboardFallback: boolean;
+    };
+    bubble: {
+      enabled: boolean;
+    };
+  };
+
+  type TextAssistRunResult = {
+    ok: boolean;
+    message: string;
+    original?: string;
+    translated?: string;
+  };
+
+  type TextAssistStatus = {
+    enabled: boolean;
+    hotkeyRegistered: boolean;
+    activeHotkey: string;
+    mode: 'triple-space' | 'hotkey';
+    lastError: string;
+  };
+
   interface Window {
     appApi: {
       onMainMessage: (listener: (message: string) => void) => () => void;
@@ -18,6 +49,14 @@ declare global {
       windowControl: {
         setAlwaysOnTop: (value: boolean) => Promise<boolean>;
         getAlwaysOnTop: () => Promise<boolean>;
+        close: () => Promise<boolean>;
+      };
+      textAssist: {
+        getConfig: () => Promise<TextAssistConfig>;
+        saveConfig: (config: Partial<TextAssistConfig>) => Promise<TextAssistConfig>;
+        getStatus: () => Promise<TextAssistStatus>;
+        runOnce: () => Promise<TextAssistRunResult>;
+        openAccessibilitySettings: () => Promise<boolean>;
       };
       providerConfig: {
         get: () => Promise<ProviderConfigState>;

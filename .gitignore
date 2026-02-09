@@ -12,6 +12,10 @@ dist-electron
 dist
 dist-ssr
 *.local
+release
+.env
+.env.*
+!.env.example
 
 # Editor directories and files
 .vscode/*

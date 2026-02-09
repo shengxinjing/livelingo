@@ -88,6 +88,15 @@ const Home: React.FC = () => {
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
   const inProgressLineIdRef = useRef<string | null>(null);
+  const pauseFinalizeTimerRef = useRef<number | null>(null);
+  const incrementalTranslateTimerRef = useRef<number | null>(null);
+  const incrementalPendingRef = useRef<{ lineId: string; text: string } | null>(null);
+  const latestInProgressTextRef = useRef('');
+  const lastPartialUpdateAtRef = useRef(0);
+  const isSpeakingRef = useRef(false);
+  const translationInFlightRef = useRef(false);
+  const queuedTranslationRef = useRef<{ lineId: string; text: string } | null>(null);
+  const recentFinalRef = useRef<{ text: string; at: number }>({ text: '', at: 0 });
 
   const [sttProvider, setSttProvider] = useState('aliyun');
   const [openaiSttApiKey, setOpenaiSttApiKey] = useState('');
@@ -102,66 +111,323 @@ const Home: React.FC = () => {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [speechLevel, setSpeechLevel] = useState(0);
 
+  const PAUSE_FINALIZE_MS = 1000;
+  const INCREMENTAL_TRANSLATE_DEBOUNCE_MS = 180;
+  const MAX_WORDS_PER_FINAL_SEGMENT = 50;
+  const DUPLICATE_FINAL_WINDOW_MS = 2200;
+
+  const normalizeSentence = (text: string): string => text.replace(/\s+/g, ' ').trim();
+
+  const isRecentDuplicateFinal = (text: string): boolean => {
+    const normalized = normalizeSentence(text);
+    if (!normalized) {
+      return false;
+    }
+    const now = Date.now();
+    return (
+      recentFinalRef.current.text === normalized &&
+      now - recentFinalRef.current.at <= DUPLICATE_FINAL_WINDOW_MS
+    );
+  };
+
+  const markRecentFinal = (text: string) => {
+    const normalized = normalizeSentence(text);
+    if (!normalized) {
+      return;
+    }
+    recentFinalRef.current = { text: normalized, at: Date.now() };
+  };
+
+  const splitByWordLimit = (text: string, maxWords: number): string[] => {
+    const normalized = normalizeSentence(text);
+    if (!normalized) {
+      return [];
+    }
+
+    const words = normalized.split(' ');
+    if (words.length <= maxWords) {
+      return [normalized];
+    }
+
+    const chunks: string[] = [];
+    for (let i = 0; i < words.length; i += maxWords) {
+      chunks.push(words.slice(i, i + maxWords).join(' ').trim());
+    }
+    return chunks.filter((chunk) => chunk.length > 0);
+  };
+
+  const countWords = (text: string): number => {
+    const normalized = normalizeSentence(text);
+    if (!normalized) {
+      return 0;
+    }
+    return normalized.split(' ').filter(Boolean).length;
+  };
+
+  const splitBySentenceAndWordLimit = (text: string, maxWords: number): string[] => {
+    const normalized = normalizeSentence(text);
+    if (!normalized) {
+      return [];
+    }
+
+    if (countWords(normalized) <= maxWords) {
+      return [normalized];
+    }
+
+    const sentenceParts = (normalized.match(/[^.!?。！？]+[.!?。！？]*/g) ?? [])
+      .map((part) => normalizeSentence(part))
+      .filter((part) => part.length > 0);
+
+    if (sentenceParts.length === 0) {
+      return splitByWordLimit(normalized, maxWords);
+    }
+
+    const result: string[] = [];
+    let current = '';
+
+    sentenceParts.forEach((part) => {
+      const candidate = current ? `${current} ${part}` : part;
+      if (countWords(candidate) <= maxWords) {
+        current = candidate;
+        return;
+      }
+
+      if (current) {
+        result.push(current);
+      }
+
+      if (countWords(part) <= maxWords) {
+        current = part;
+      } else {
+        result.push(...splitByWordLimit(part, maxWords));
+        current = '';
+      }
+    });
+
+    if (current) {
+      result.push(current);
+    }
+
+    return result.filter((item) => item.length > 0);
+  };
+
+  const findReusableLastLineId = (content: string): string | null => {
+    const normalized = normalizeSentence(content);
+    if (!normalized) {
+      return null;
+    }
+
+    const lastLine = linesRef.current[linesRef.current.length - 1];
+    if (!lastLine) {
+      return null;
+    }
+
+    const lastOriginal = normalizeSentence(lastLine.original);
+    if (!lastOriginal) {
+      return lastLine.id;
+    }
+
+    const isSameSentenceStream =
+      normalized.startsWith(lastOriginal) ||
+      lastOriginal.startsWith(normalized);
+
+    return isSameSentenceStream ? lastLine.id : null;
+  };
+
+  const clearPauseFinalizeTimer = () => {
+    if (pauseFinalizeTimerRef.current !== null) {
+      window.clearTimeout(pauseFinalizeTimerRef.current);
+      pauseFinalizeTimerRef.current = null;
+    }
+  };
+
+  const clearIncrementalTranslateTimer = () => {
+    if (incrementalTranslateTimerRef.current !== null) {
+      window.clearTimeout(incrementalTranslateTimerRef.current);
+      incrementalTranslateTimerRef.current = null;
+    }
+    incrementalPendingRef.current = null;
+    queuedTranslationRef.current = null;
+  };
+
+  const requestLineTranslation = async (lineId: string, text: string) => {
+    const content = text.trim();
+    if (!content) {
+      return;
+    }
+
+    const translated = await translateText(content);
+    setLines((prev) =>
+      prev.map((line) => {
+        if (line.id !== lineId) {
+          return line;
+        }
+        return { ...line, translated };
+      })
+    );
+  };
+
+  const flushQueuedTranslation = () => {
+    if (translationInFlightRef.current) {
+      return;
+    }
+
+    const pending = queuedTranslationRef.current;
+    if (!pending) {
+      return;
+    }
+
+    queuedTranslationRef.current = null;
+    translationInFlightRef.current = true;
+    void (async () => {
+      try {
+        await requestLineTranslation(pending.lineId, pending.text);
+      } finally {
+        translationInFlightRef.current = false;
+        flushQueuedTranslation();
+      }
+    })();
+  };
+
+  const enqueueLineTranslation = (lineId: string, text: string) => {
+    queuedTranslationRef.current = { lineId, text };
+    flushQueuedTranslation();
+  };
+
+  const scheduleIncrementalTranslation = (lineId: string, text: string) => {
+    incrementalPendingRef.current = { lineId, text };
+    if (incrementalTranslateTimerRef.current !== null) {
+      return;
+    }
+
+    incrementalTranslateTimerRef.current = window.setTimeout(() => {
+      incrementalTranslateTimerRef.current = null;
+      const pending = incrementalPendingRef.current;
+      if (!pending) {
+        return;
+      }
+
+      enqueueLineTranslation(pending.lineId, pending.text);
+      incrementalPendingRef.current = null;
+    }, INCREMENTAL_TRANSLATE_DEBOUNCE_MS);
+  };
+
+  const finalizeCurrentSentence = (rawText?: string) => {
+    const content = (rawText ?? latestInProgressTextRef.current).trim();
+    if (!content) {
+      clearPauseFinalizeTimer();
+      clearIncrementalTranslateTimer();
+      return;
+    }
+
+    const targetLineId =
+      inProgressLineIdRef.current ??
+      findReusableLastLineId(content) ??
+      createId();
+    inProgressLineIdRef.current = targetLineId;
+    setLines((prev) => {
+      const index = prev.findIndex((line) => line.id === targetLineId);
+      if (index >= 0) {
+        const updated = [...prev];
+        updated[index] = { ...updated[index], original: content };
+        return updated;
+      }
+
+      return [...prev, { id: targetLineId, original: content, translated: '' }];
+    });
+
+    enqueueLineTranslation(targetLineId, content);
+    markRecentFinal(content);
+
+    inProgressLineIdRef.current = null;
+    latestInProgressTextRef.current = '';
+    clearPauseFinalizeTimer();
+    clearIncrementalTranslateTimer();
+  };
+
+  const runPauseFinalizeCheck = () => {
+    const idleMs = Date.now() - lastPartialUpdateAtRef.current;
+    const canFinalize = idleMs >= PAUSE_FINALIZE_MS && !isSpeakingRef.current;
+    if (canFinalize) {
+      finalizeCurrentSentence();
+      return;
+    }
+
+    pauseFinalizeTimerRef.current = window.setTimeout(runPauseFinalizeCheck, 180);
+  };
+
+  const schedulePauseFinalizeCheck = () => {
+    clearPauseFinalizeTimer();
+    pauseFinalizeTimerRef.current = window.setTimeout(runPauseFinalizeCheck, PAUSE_FINALIZE_MS);
+  };
+
   const upsertInProgressSentence = (text: string) => {
     const content = text.trim();
     if (!content) {
       return;
     }
 
-    let nextInProgressLineId = inProgressLineIdRef.current;
+    const nextInProgressLineId =
+      inProgressLineIdRef.current ??
+      findReusableLastLineId(content) ??
+      createId();
+    inProgressLineIdRef.current = nextInProgressLineId;
     setLines((prev) => {
-      if (nextInProgressLineId) {
-        const index = prev.findIndex((line) => line.id === nextInProgressLineId);
-        if (index >= 0) {
-          const updated = [...prev];
-          updated[index] = { ...updated[index], original: content, translated: '' };
-          return updated;
-        }
+      const index = prev.findIndex((line) => line.id === nextInProgressLineId);
+      if (index >= 0) {
+        const updated = [...prev];
+        updated[index] = { ...updated[index], original: content };
+        return updated;
       }
 
-      nextInProgressLineId = createId();
       return [...prev, { id: nextInProgressLineId, original: content, translated: '' }];
     });
-    inProgressLineIdRef.current = nextInProgressLineId;
+    latestInProgressTextRef.current = content;
+    lastPartialUpdateAtRef.current = Date.now();
+
+    schedulePauseFinalizeCheck();
+
+    scheduleIncrementalTranslation(nextInProgressLineId, content);
   };
 
   const commitRecognizedSentence = (text: string) => {
-    const content = text.trim();
+    const content = normalizeSentence(text);
     if (!content) {
       return;
     }
 
-    let targetLineId = inProgressLineIdRef.current;
-    setLines((prev) => {
-      if (targetLineId) {
-        const index = prev.findIndex((line) => line.id === targetLineId);
-        if (index >= 0) {
-          const updated = [...prev];
-          updated[index] = { ...updated[index], original: content };
-          return updated;
-        }
+    if (isRecentDuplicateFinal(content)) {
+      return;
+    }
+
+    const segments = splitBySentenceAndWordLimit(content, MAX_WORDS_PER_FINAL_SEGMENT);
+    if (segments.length === 0) {
+      return;
+    }
+
+    if (!inProgressLineIdRef.current && linesRef.current.length > 0) {
+      const lastLine = linesRef.current[linesRef.current.length - 1];
+      const lastOriginal = normalizeSentence(lastLine.original);
+      const recentFinal = recentFinalRef.current.text;
+      const recentlyFinalized = Date.now() - recentFinalRef.current.at <= 5000;
+      const shouldMergeIntoLast =
+        content.startsWith(lastOriginal) ||
+        lastOriginal.startsWith(content) ||
+        (recentlyFinalized &&
+          (content.startsWith(recentFinal) || recentFinal.startsWith(content)));
+
+      if (shouldMergeIntoLast) {
+        inProgressLineIdRef.current = lastLine.id;
       }
+    }
 
-      targetLineId = createId();
-      return [...prev, { id: targetLineId, original: content, translated: '' }];
+    segments.forEach((segment) => {
+      if (isRecentDuplicateFinal(segment)) {
+        return;
+      }
+      upsertInProgressSentence(segment);
+      finalizeCurrentSentence(segment);
     });
-    inProgressLineIdRef.current = null;
-
-    void (async () => {
-      const translated = await translateText(content);
-      setLines((prev) =>
-        prev.map((line) => {
-          if (line.id !== targetLineId) {
-            return line;
-          }
-          // Avoid stale translation overriding newer merged content.
-          if (line.original !== content) {
-            return line;
-          }
-          return { ...line, translated };
-        })
-      );
-    })();
   };
 
   useEffect(() => {
@@ -209,6 +475,8 @@ const Home: React.FC = () => {
     return () => {
       offAliyunResult();
       offAliyunError();
+      clearPauseFinalizeTimer();
+      clearIncrementalTranslateTimer();
       stopVoiceMonitor();
       stopAliyunCapture();
     };
@@ -252,6 +520,7 @@ const Home: React.FC = () => {
     analyserRef.current = null;
     audioContextRef.current = null;
     setIsSpeaking(false);
+    isSpeakingRef.current = false;
     setSpeechLevel(0);
   };
 
@@ -282,9 +551,11 @@ const Home: React.FC = () => {
       }
       const rms = Math.sqrt(sumSquares / data.length);
       const normalized = Math.max(0, Math.min(1, (rms - 0.015) * 10));
+      const speaking = rms > speakingThreshold;
 
       setSpeechLevel(normalized);
-      setIsSpeaking(rms > speakingThreshold);
+      setIsSpeaking(speaking);
+      isSpeakingRef.current = speaking;
       animationFrameRef.current = requestAnimationFrame(tick);
     };
 
@@ -445,6 +716,13 @@ const Home: React.FC = () => {
     setLines([]);
     setStatus('');
     inProgressLineIdRef.current = null;
+    latestInProgressTextRef.current = '';
+    lastPartialUpdateAtRef.current = 0;
+    isSpeakingRef.current = false;
+    translationInFlightRef.current = false;
+    queuedTranslationRef.current = null;
+    clearPauseFinalizeTimer();
+    clearIncrementalTranslateTimer();
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -517,6 +795,9 @@ const Home: React.FC = () => {
     stopAliyunCapture();
     stopVoiceMonitor();
     inProgressLineIdRef.current = null;
+    latestInProgressTextRef.current = '';
+    clearPauseFinalizeTimer();
+    clearIncrementalTranslateTimer();
 
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
@@ -552,7 +833,7 @@ const Home: React.FC = () => {
         }}
       >
         {lines.length === 0 && !isRecording && (
-          <div style={{ marginTop: '20vh', color: '#888', textAlign: 'left' }}>
+          <div style={{ marginTop: '20vh', color: 'rgba(226, 232, 240, 0.9)', textAlign: 'left' }}>
             <p style={{ marginBottom: '10px' }}>Ready to transcribe and translate.</p>
             <p style={{ fontSize: '0.9em' }}>Click the microphone to start.</p>
           </div>
@@ -568,7 +849,7 @@ const Home: React.FC = () => {
               maxWidth: '100%',
               fontSize: '18px',
               lineHeight: '1.5',
-              color: '#222',
+              color: '#f8fafc',
               textAlign: 'left',
               whiteSpace: 'pre-wrap',
               overflowWrap: 'anywhere',
@@ -582,7 +863,7 @@ const Home: React.FC = () => {
               <div
                 style={{
                   marginTop: 6,
-                  color: '#0a5cad',
+                  color: '#93c5fd',
                   whiteSpace: 'pre-wrap',
                   overflowWrap: 'anywhere',
                   wordBreak: 'break-word'
@@ -595,13 +876,13 @@ const Home: React.FC = () => {
         ))}
 
         {isProcessing && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#666', fontSize: '14px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#cbd5e1', fontSize: '14px' }}>
             <Loader2 className="animate-spin" size={16} />
             <span>Processing chunk...</span>
           </div>
         )}
 
-        {status && <div style={{ color: '#666', fontSize: '13px' }}>{status}</div>}
+        {status && <div style={{ color: '#cbd5e1', fontSize: '13px' }}>{status}</div>}
 
         <div style={{ height: '24px', flexShrink: 0 }} />
       </div>
@@ -635,7 +916,7 @@ const Home: React.FC = () => {
         style={{
           position: 'absolute',
           bottom: '102px',
-          left: '18px',
+          right: '18px',
           display: 'flex',
           gap: '12px',
           zIndex: 50

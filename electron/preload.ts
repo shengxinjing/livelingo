@@ -18,7 +18,15 @@ const bridgeApi = {
   },
   windowControl: {
     setAlwaysOnTop: (value: boolean): Promise<boolean> => ipcRenderer.invoke('window:set-always-on-top', value),
-    getAlwaysOnTop: (): Promise<boolean> => ipcRenderer.invoke('window:get-always-on-top')
+    getAlwaysOnTop: (): Promise<boolean> => ipcRenderer.invoke('window:get-always-on-top'),
+    close: (): Promise<boolean> => ipcRenderer.invoke('window:close')
+  },
+  textAssist: {
+    getConfig: () => ipcRenderer.invoke('text-assist:get-config'),
+    saveConfig: (config: unknown) => ipcRenderer.invoke('text-assist:save-config', config),
+    getStatus: () => ipcRenderer.invoke('text-assist:get-status'),
+    runOnce: () => ipcRenderer.invoke('text-assist:run-once'),
+    openAccessibilitySettings: () => ipcRenderer.invoke('text-assist:open-accessibility-settings')
   },
   providerConfig: {
     get: (): Promise<ProviderConfigState> => ipcRenderer.invoke('provider-config:get'),

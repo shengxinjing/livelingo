@@ -1,4 +1,5 @@
 .settings-container {
+  position: relative;
   display: flex;
   flex-direction: row;
   /* Sidebar and Content side by side */
@@ -223,4 +224,27 @@
   margin-top: 20px;
   font-size: 14px;
   color: #0a5cad;
+}
+
+.settings-back-fab {
+  position: absolute;
+  right: 24px;
+  bottom: 20px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 1px solid #ddd;
+  background: rgba(255, 255, 255, 0.92);
+  color: #555;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+  cursor: pointer;
+  z-index: 120;
+  padding: 0;
+}
+
+.settings-back-fab:hover {
+  background: #fff;
 }
