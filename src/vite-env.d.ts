@@ -39,6 +39,12 @@ declare global {
     lastError: string;
   };
 
+  type ExternalSelectionPayload = {
+    original: string;
+    translated: string;
+    capturedAt: string;
+  };
+
   interface Window {
     appApi: {
       onMainMessage: (listener: (message: string) => void) => () => void;
@@ -57,6 +63,9 @@ declare global {
         getStatus: () => Promise<TextAssistStatus>;
         runOnce: () => Promise<TextAssistRunResult>;
         openAccessibilitySettings: () => Promise<boolean>;
+      };
+      externalSelection: {
+        onTranslated: (listener: (payload: ExternalSelectionPayload) => void) => () => void;
       };
       providerConfig: {
         get: () => Promise<ProviderConfigState>;

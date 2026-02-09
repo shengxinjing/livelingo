@@ -61,7 +61,12 @@ function downsampleTo16k(input: Float32Array, inputSampleRate: number): Int16Arr
   return output;
 }
 
-const Home: React.FC = () => {
+type HomeProps = {
+  externalSelectionPayload?: ExternalSelectionPayload | null;
+  externalSelectionVersion?: number;
+};
+
+const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelectionVersion }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [lines, setLines] = useState<TranscriptLine[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -493,6 +498,60 @@ const Home: React.FC = () => {
   useEffect(() => {
     linesRef.current = lines;
   }, [lines]);
+
+  useEffect(() => {
+    const handlePaste = (event: ClipboardEvent) => {
+      const raw = event.clipboardData?.getData('text') ?? '';
+      if (!raw.trim()) {
+        return;
+      }
+
+      event.preventDefault();
+      const chunks = raw
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+
+      if (chunks.length === 0) {
+        return;
+      }
+
+      const appended = chunks.map((original) => ({
+        id: createId(),
+        original,
+        translated: ''
+      }));
+
+      setLines((prev) => [...prev, ...appended]);
+      appended.forEach((line) => {
+        enqueueLineTranslation(line.id, line.original);
+      });
+      setStatus(`Pasted ${appended.length} line${appended.length > 1 ? 's' : ''} from clipboard.`);
+    };
+
+    window.addEventListener('paste', handlePaste);
+    return () => {
+      window.removeEventListener('paste', handlePaste);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [translationEnabled, translationTargetLanguage, qwenApiKey, qwenBaseUrl, qwenModel]);
+
+  useEffect(() => {
+    const payload = externalSelectionPayload;
+    if (!payload?.original?.trim()) {
+      return;
+    }
+
+    setLines((prev) => [
+      ...prev,
+      {
+        id: createId(),
+        original: payload.original.trim(),
+        translated: payload.translated?.trim() ?? ''
+      }
+    ]);
+    setStatus('Inserted selected text from external app.');
+  }, [externalSelectionPayload, externalSelectionVersion]);
 
   const stopAliyunCapture = () => {
     aliyunProcessorRef.current?.disconnect();

@@ -28,6 +28,16 @@ const bridgeApi = {
     runOnce: () => ipcRenderer.invoke('text-assist:run-once'),
     openAccessibilitySettings: () => ipcRenderer.invoke('text-assist:open-accessibility-settings')
   },
+  externalSelection: {
+    onTranslated: (listener: (payload: { original: string; translated: string; capturedAt: string }) => void) => {
+      const wrapped = (
+        _event: Electron.IpcRendererEvent,
+        payload: { original: string; translated: string; capturedAt: string }
+      ) => listener(payload);
+      ipcRenderer.on('external-selection:translated', wrapped);
+      return () => ipcRenderer.off('external-selection:translated', wrapped);
+    }
+  },
   providerConfig: {
     get: (): Promise<ProviderConfigState> => ipcRenderer.invoke('provider-config:get'),
     save: (config: ProviderConfigState): Promise<ProviderConfigState> =>
