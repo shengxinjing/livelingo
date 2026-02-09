@@ -47,13 +47,15 @@ function createWindow() {
   win = new BrowserWindow({
     title: 'LiveLingo',
     frame: true,
-    titleBarStyle: 'hiddenInset',
-    transparent: true,
-    backgroundColor: '#CCFFFFFF',
+    titleBarStyle: 'default',
+    transparent: false,
+    backgroundColor: '#FFFFFF',
     width: 1200,
     height: 820,
-    minWidth: 900,
-    minHeight: 620,
+    minWidth: 400,
+    minHeight: 300,
+    movable: true,
+    resizable: true,
     icon: path.join(process.env.VITE_PUBLIC, 'logo.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.mjs')
