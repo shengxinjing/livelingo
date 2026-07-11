@@ -7,6 +7,8 @@
     "dev": "vite",
     "bump-version": "node ./scripts/bump-version.mjs",
     "build": "npm run bump-version && tsc && vite build && electron-builder",
+    "release": "node ./scripts/release.mjs",
+    "release:mac": "tsc && vite build && electron-builder --mac",
     "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
     "preview": "vite preview"
   },

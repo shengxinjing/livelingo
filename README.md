@@ -44,6 +44,18 @@ npm run dev
 npm run build
 ```
 
+## 自动发布
+
+在干净且已与 `origin/main` 同步的 `main` 分支运行：
+
+```bash
+npm run release
+```
+
+该命令会自动运行代码检查、递增补丁版本、创建发布提交和 `vX.Y.Z` Tag，并将两者原子推送到 GitHub。Tag 推送后，GitHub Actions 会构建 macOS DMG、创建正式 GitHub Release 并上传安装包。
+
+GitHub Actions 使用仓库自动提供的 `GITHUB_TOKEN`，无需手动配置 GitHub Token。当前发布包尚未配置 Apple 签名和公证。
+
 ## 设置说明
 
 在应用 `Settings` 页面可配置：

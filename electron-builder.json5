@@ -11,6 +11,14 @@
     "dist",
     "dist-electron"
   ],
+  "publish": [
+    {
+      "provider": "github",
+      "owner": "shengxinjing",
+      "repo": "livelingo",
+      "releaseType": "release"
+    }
+  ],
   "mac": {
     "icon": "public/live-lingo/web/icon-512.png",
     "target": [
