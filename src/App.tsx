@@ -11,8 +11,6 @@ function App() {
   const location = useLocation()
   const isSettings = location.pathname === '/settings'
   const [isPinned, setIsPinned] = useState(false)
-  const [externalSelectionPayload, setExternalSelectionPayload] = useState<ExternalSelectionPayload | null>(null)
-  const [externalSelectionVersion, setExternalSelectionVersion] = useState(0)
 
   useEffect(() => {
     const loadPinState = async () => {
@@ -26,15 +24,6 @@ function App() {
     const next = await window.appApi.windowControl.setAlwaysOnTop(!isPinned)
     setIsPinned(next)
   }
-
-  useEffect(() => {
-    const off = window.appApi.externalSelection.onTranslated((payload) => {
-      setExternalSelectionPayload(payload)
-      setExternalSelectionVersion((prev) => prev + 1)
-      navigate('/')
-    })
-    return () => off()
-  }, [navigate])
 
   return (
     <div
@@ -54,15 +43,7 @@ function App() {
       {/* Main Content Area */}
       <main style={{ height: '100%', width: '100%', padding: '0', boxSizing: 'border-box' }}>
         <Routes>
-          <Route
-            path="/"
-            element={
-              <Home
-                externalSelectionPayload={externalSelectionPayload}
-                externalSelectionVersion={externalSelectionVersion}
-              />
-            }
-          />
+          <Route path="/" element={<Home />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>

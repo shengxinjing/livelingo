@@ -1,19 +1,16 @@
 import React, { useEffect, useState } from 'react';
 import * as Tabs from '@radix-ui/react-tabs';
-import { ArrowLeft, Keyboard, Languages, Mic } from 'lucide-react';
+import { ArrowLeft, ExternalLink, Keyboard, Languages, Mic } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import './Settings.css';
 
 const Settings: React.FC = () => {
   const navigate = useNavigate();
 
-  const [sttProvider, setSttProvider] = useState('aliyun');
   const [aliyunApiKey, setAliyunApiKey] = useState('');
-  const [openaiSttApiKeyInput, setOpenaiSttApiKeyInput] = useState('');
 
   const [translationTargetLanguage, setTranslationTargetLanguage] = useState('English');
   const [translationEnabled, setTranslationEnabled] = useState(true);
-  const [qwenTranslationApiKeyInput, setQwenTranslationApiKeyInput] = useState('');
 
   const [statusMessage, setStatusMessage] = useState('');
   const [isBusy, setIsBusy] = useState(false);
@@ -26,24 +23,18 @@ const Settings: React.FC = () => {
 
   useEffect(() => {
     const loadSettings = async () => {
-      const storedSttProvider = (await window.appApi.store.get('sttProvider')) as string | undefined;
       const storedAliyunKey = (await window.appApi.store.get('aliyunApiKey')) as string | undefined;
       const storedTranslationTargetLanguage =
         (await window.appApi.store.get('translationTargetLanguage')) as string | undefined;
       const storedTranslationEnabled = (await window.appApi.store.get('translationEnabled')) as boolean | undefined;
 
-      const openaiKey = await window.appApi.providerKey.getDecrypted('openai');
-      const qwenKey = await window.appApi.providerKey.getDecrypted('qwen');
       const textAssistConfig = await window.appApi.textAssist.getConfig();
       const status = await window.appApi.textAssist.getStatus();
 
-      setSttProvider(storedSttProvider ?? 'aliyun');
       setAliyunApiKey(storedAliyunKey ?? '');
-      setOpenaiSttApiKeyInput(openaiKey);
 
       setTranslationTargetLanguage(storedTranslationTargetLanguage ?? 'English');
       setTranslationEnabled(storedTranslationEnabled ?? true);
-      setQwenTranslationApiKeyInput(qwenKey);
 
       setTextAssistEnabled(textAssistConfig.enabled);
       setTextAssistDebugLogging(textAssistConfig.debugLogging);
@@ -58,14 +49,9 @@ const Settings: React.FC = () => {
 
   const saveSpeechSettings = async () => {
     setIsBusy(true);
-    await window.appApi.store.set('sttProvider', sttProvider);
-    await window.appApi.store.set('aliyunApiKey', aliyunApiKey);
+    await window.appApi.store.set('aliyunApiKey', aliyunApiKey.trim());
 
-    if (openaiSttApiKeyInput.trim()) {
-      await window.appApi.providerKey.save('openai', openaiSttApiKeyInput.trim());
-    }
-
-    setStatusMessage('Speech settings saved.');
+    setStatusMessage('Aliyun API key saved.');
     setIsBusy(false);
   };
 
@@ -75,10 +61,6 @@ const Settings: React.FC = () => {
     await window.appApi.store.set('translationProvider', 'qwen');
     await window.appApi.store.set('translationTargetLanguage', translationTargetLanguage);
     await window.appApi.store.set('translationEnabled', translationEnabled);
-
-    if (qwenTranslationApiKeyInput.trim()) {
-      await window.appApi.providerKey.save('qwen', qwenTranslationApiKeyInput.trim());
-    }
 
     setStatusMessage('Translation settings saved.');
     setIsBusy(false);
@@ -151,58 +133,39 @@ const Settings: React.FC = () => {
           <div className="TabsContentScroll">
             <Tabs.Content className="TabsContent" value="speech">
               <h3>Speech Recognition</h3>
-              <p className="description">Configure STT provider and key.</p>
+              <p className="description">
+                One Aliyun DashScope key is shared by speech recognition, translation, and Text Assist.
+              </p>
 
               <div className="input-group">
-                <label>STT Provider</label>
-                <select value={sttProvider} onChange={(event) => setSttProvider(event.target.value)}>
-                  <option value="aliyun">Aliyun (FunASR/Paraformer)</option>
-                  <option value="openai">OpenAI (Whisper)</option>
-                </select>
-              </div>
-
-              {sttProvider === 'aliyun' && (
-                <div className="input-group">
-                  <label>Aliyun DashScope API Key</label>
-                  <input
-                    type="text"
-                    value={aliyunApiKey}
-                    onChange={(event) => setAliyunApiKey(event.target.value)}
-                    placeholder="sk-..."
-                  />
-                </div>
-              )}
-
-              <div className="input-group">
-                <label>OpenAI API Key</label>
+                <label htmlFor="aliyun-api-key">Aliyun DashScope API Key</label>
                 <input
+                  id="aliyun-api-key"
                   type="text"
-                  value={openaiSttApiKeyInput}
-                  onChange={(event) => setOpenaiSttApiKeyInput(event.target.value)}
+                  value={aliyunApiKey}
+                  onChange={(event) => setAliyunApiKey(event.target.value)}
                   placeholder="sk-..."
                 />
+                <button
+                  type="button"
+                  className="api-key-link"
+                  onClick={() => void window.appApi.windowControl.openAliyunApiKeyPage()}
+                >
+                  Get an Aliyun API key
+                  <ExternalLink size={14} />
+                </button>
               </div>
 
               <div className="actions">
                 <button onClick={saveSpeechSettings} className="save-button" disabled={isBusy}>
-                  Save Speech Settings
+                  Save Aliyun Key
                 </button>
               </div>
             </Tabs.Content>
 
             <Tabs.Content className="TabsContent" value="translation">
               <h3>Translation Service</h3>
-              <p className="description">Use Tongyi Qwen (DashScope) for translation.</p>
-
-              <div className="input-group">
-                <label>API Key</label>
-                <input
-                  type="text"
-                  value={qwenTranslationApiKeyInput}
-                  onChange={(event) => setQwenTranslationApiKeyInput(event.target.value)}
-                  placeholder="sk-..."
-                />
-              </div>
+              <p className="description">Tongyi Qwen uses the Aliyun key saved under Speech.</p>
 
               <div className="input-group">
                 <label>Target Language</label>

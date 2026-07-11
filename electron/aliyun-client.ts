@@ -23,6 +23,7 @@ export class AliyunRealtimeClient {
   private readonly onError: ErrorHandler;
   private taskId = '';
   private taskStarted = false;
+  private stopRequested = false;
 
   constructor(config: AliyunConfig, onResult: MessageHandler, onError: ErrorHandler) {
     this.config = config;
@@ -37,8 +38,22 @@ export class AliyunRealtimeClient {
 
     this.taskId = uuidv4().replace(/-/g, '');
     this.taskStarted = false;
+    this.stopRequested = false;
 
     await new Promise<void>((resolve, reject) => {
+      let startSettled = false;
+      const handleFailure = (error: Error) => {
+        clearTimeout(timeout);
+        if (!startSettled) {
+          startSettled = true;
+          reject(error);
+          return;
+        }
+
+        this.taskStarted = false;
+        this.onError(error);
+      };
+
       this.ws = new WebSocket(ALIYUN_WS_URL, {
         headers: {
           Authorization: `Bearer ${this.config.apiKey}`
@@ -46,7 +61,7 @@ export class AliyunRealtimeClient {
       });
 
       const timeout = setTimeout(() => {
-        reject(new Error('Aliyun WS start timeout: task-started not received.'));
+        handleFailure(new Error('Aliyun WS start timeout: task-started not received.'));
       }, 8000);
 
       this.ws.on('open', () => {
@@ -63,7 +78,11 @@ export class AliyunRealtimeClient {
         const event = typeof header.event === 'string' ? header.event : '';
 
         if (event === 'task-started') {
+          if (startSettled) {
+            return;
+          }
           this.taskStarted = true;
+          startSettled = true;
           clearTimeout(timeout);
           resolve();
           return;
@@ -73,8 +92,7 @@ export class AliyunRealtimeClient {
           const message = typeof header.error_message === 'string'
             ? header.error_message
             : 'Aliyun task failed.';
-          clearTimeout(timeout);
-          reject(new Error(message));
+          handleFailure(new Error(message));
           return;
         }
 
@@ -93,12 +111,19 @@ export class AliyunRealtimeClient {
       });
 
       this.ws.on('error', (error) => {
-        clearTimeout(timeout);
-        reject(error instanceof Error ? error : new Error(String(error)));
+        handleFailure(error instanceof Error ? error : new Error(String(error)));
       });
 
       this.ws.on('close', () => {
+        const wasStarted = this.taskStarted;
         this.taskStarted = false;
+        if (!startSettled) {
+          handleFailure(new Error('Aliyun STT connection closed before startup completed.'));
+          return;
+        }
+        if (wasStarted && !this.stopRequested) {
+          this.onError(new Error('Aliyun STT connection closed unexpectedly.'));
+        }
       });
     }).catch((error) => {
       this.onError(error instanceof Error ? error : new Error(String(error)));
@@ -114,6 +139,7 @@ export class AliyunRealtimeClient {
   }
 
   public stop(): void {
+    this.stopRequested = true;
     if (!this.ws) {
       return;
     }
@@ -125,7 +151,9 @@ export class AliyunRealtimeClient {
           task_id: this.taskId,
           streaming: 'duplex'
         },
-        payload: {}
+        payload: {
+          input: {}
+        }
       };
       this.ws.send(JSON.stringify(finishFrame));
     }

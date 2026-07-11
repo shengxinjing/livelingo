@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Loader2, Mic, Square } from 'lucide-react';
+import { Mic, Square } from 'lucide-react';
 import { QwenTranslateService } from '../services/qwen-translate';
 
 type TranscriptLine = {
@@ -61,15 +61,9 @@ function downsampleTo16k(input: Float32Array, inputSampleRate: number): Int16Arr
   return output;
 }
 
-type HomeProps = {
-  externalSelectionPayload?: ExternalSelectionPayload | null;
-  externalSelectionVersion?: number;
-};
-
-const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelectionVersion }) => {
+const Home: React.FC = () => {
   const [isRecording, setIsRecording] = useState(false);
   const [lines, setLines] = useState<TranscriptLine[]>([]);
-  const [isProcessing, setIsProcessing] = useState(false);
   const [status, setStatus] = useState('');
   const [selectedText, setSelectedText] = useState('');
   const [selectedTranslation, setSelectedTranslation] = useState('');
@@ -80,7 +74,6 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
   const selectionRequestIdRef = useRef(0);
   const selectionTranslationCacheRef = useRef<Map<string, string>>(new Map());
   const selectionMouseAnchorRef = useRef<{ x: number; y: number } | null>(null);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
   const aliyunAudioContextRef = useRef<AudioContext | null>(null);
@@ -92,36 +85,57 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
   const analyserRef = useRef<AnalyserNode | null>(null);
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const animationFrameRef = useRef<number | null>(null);
-  const inProgressLineIdRef = useRef<string | null>(null);
+  const activeLineIdRef = useRef<string | null>(null);
   const pauseFinalizeTimerRef = useRef<number | null>(null);
   const incrementalTranslateTimerRef = useRef<number | null>(null);
   const incrementalPendingRef = useRef<{ lineId: string; text: string } | null>(null);
+  const lastIncrementalTranslationRef = useRef<{ lineId: string; text: string } | null>(null);
   const latestInProgressTextRef = useRef('');
   const lastPartialUpdateAtRef = useRef(0);
   const isSpeakingRef = useRef(false);
   const translationInFlightRef = useRef(false);
-  const queuedTranslationRef = useRef<{ lineId: string; text: string } | null>(null);
+  const queuedTranslationRef = useRef<{ lineId: string; text: string; version: number; session: number } | null>(null);
+  const translationSessionRef = useRef(0);
+  const translationVersionsRef = useRef<Map<string, number>>(new Map());
   const recentFinalRef = useRef<{ text: string; at: number }>({ text: '', at: 0 });
 
-  const [sttProvider, setSttProvider] = useState('aliyun');
-  const [openaiSttApiKey, setOpenaiSttApiKey] = useState('');
   const [aliyunApiKey, setAliyunApiKey] = useState('');
 
   const [translationEnabled, setTranslationEnabled] = useState(true);
   const [translationTargetLanguage, setTranslationTargetLanguage] = useState('English');
-  const [qwenApiKey, setQwenApiKey] = useState('');
   const [qwenBaseUrl, setQwenBaseUrl] = useState('https://dashscope.aliyuncs.com/compatible-mode/v1');
   const [qwenModel, setQwenModel] = useState('qwen-plus');
 
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [speechLevel, setSpeechLevel] = useState(0);
 
-  const PAUSE_FINALIZE_MS = 1000;
-  const INCREMENTAL_TRANSLATE_DEBOUNCE_MS = 180;
-  const MAX_WORDS_PER_FINAL_SEGMENT = 50;
+  const PAUSE_FINALIZE_MS = 1300;
+  const INCREMENTAL_TRANSLATE_DEBOUNCE_MS = 800;
+  const INCREMENTAL_TRANSLATE_MIN_WORD_DELTA = 8;
+  const MAX_WORDS_PER_FINAL_SEGMENT = 45;
   const DUPLICATE_FINAL_WINDOW_MS = 2200;
 
   const normalizeSentence = (text: string): string => text.replace(/\s+/g, ' ').trim();
+  const toWords = (text: string): string[] =>
+    normalizeSentence(text)
+      .toLowerCase()
+      .split(' ')
+      .map((word) => word.replace(/^[^\w]+|[^\w]+$/g, ''))
+      .filter((word) => word.length > 0);
+
+  const commonPrefixWords = (a: string, b: string): number => {
+    const aw = toWords(a);
+    const bw = toWords(b);
+    const limit = Math.min(aw.length, bw.length);
+    let count = 0;
+    for (let i = 0; i < limit; i += 1) {
+      if (aw[i] !== bw[i]) {
+        break;
+      }
+      count += 1;
+    }
+    return count;
+  };
 
   const isRecentDuplicateFinal = (text: string): boolean => {
     const normalized = normalizeSentence(text);
@@ -232,9 +246,14 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
       return lastLine.id;
     }
 
+    const prefixWords = commonPrefixWords(normalized, lastOriginal);
+    const minWordCount = Math.max(1, Math.min(countWords(normalized), countWords(lastOriginal)));
+    const prefixRatio = prefixWords / minWordCount;
     const isSameSentenceStream =
       normalized.startsWith(lastOriginal) ||
-      lastOriginal.startsWith(normalized);
+      lastOriginal.startsWith(normalized) ||
+      prefixWords >= 4 ||
+      (prefixWords >= 3 && prefixRatio >= 0.55);
 
     return isSameSentenceStream ? lastLine.id : null;
   };
@@ -252,17 +271,57 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
       incrementalTranslateTimerRef.current = null;
     }
     incrementalPendingRef.current = null;
-    queuedTranslationRef.current = null;
   };
 
-  const requestLineTranslation = async (lineId: string, text: string) => {
+  const resetTranslationQueue = () => {
+    translationSessionRef.current += 1;
+    clearIncrementalTranslateTimer();
+    queuedTranslationRef.current = null;
+    translationInFlightRef.current = false;
+    lastIncrementalTranslationRef.current = null;
+    translationVersionsRef.current.clear();
+  };
+
+  const setTranscriptLines = (updater: (prev: TranscriptLine[]) => TranscriptLine[]) => {
+    setLines((prev) => {
+      const next = updater(prev);
+      linesRef.current = next;
+      return next;
+    });
+  };
+
+  const upsertTranscriptLine = (lineId: string, original: string) => {
+    setTranscriptLines((prev) => {
+      const index = prev.findIndex((line) => line.id === lineId);
+      if (index >= 0) {
+        const current = prev[index];
+        if (current.original === original) {
+          return prev;
+        }
+        const updated = [...prev];
+        updated[index] = { ...current, original };
+        return updated;
+      }
+
+      return [...prev, { id: lineId, original, translated: '' }];
+    });
+  };
+
+  const requestLineTranslation = async (lineId: string, text: string, version: number, session: number) => {
     const content = text.trim();
     if (!content) {
       return;
     }
 
     const translated = await translateText(content);
-    setLines((prev) =>
+    if (translationSessionRef.current !== session) {
+      return;
+    }
+    if (translationVersionsRef.current.get(lineId) !== version) {
+      return;
+    }
+
+    setTranscriptLines((prev) =>
       prev.map((line) => {
         if (line.id !== lineId) {
           return line;
@@ -284,22 +343,52 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
 
     queuedTranslationRef.current = null;
     translationInFlightRef.current = true;
+    const session = pending.session;
     void (async () => {
       try {
-        await requestLineTranslation(pending.lineId, pending.text);
+        await requestLineTranslation(pending.lineId, pending.text, pending.version, session);
       } finally {
-        translationInFlightRef.current = false;
-        flushQueuedTranslation();
+        if (translationSessionRef.current === session) {
+          translationInFlightRef.current = false;
+          flushQueuedTranslation();
+        }
       }
     })();
   };
 
   const enqueueLineTranslation = (lineId: string, text: string) => {
-    queuedTranslationRef.current = { lineId, text };
+    const version = (translationVersionsRef.current.get(lineId) ?? 0) + 1;
+    translationVersionsRef.current.set(lineId, version);
+    queuedTranslationRef.current = { lineId, text, version, session: translationSessionRef.current };
     flushQueuedTranslation();
   };
 
+  const shouldTranslateIncrementally = (lineId: string, text: string): boolean => {
+    const content = normalizeSentence(text);
+    if (!content) {
+      return false;
+    }
+
+    const last = lastIncrementalTranslationRef.current;
+    if (!last || last.lineId !== lineId) {
+      return countWords(content) >= 4 || content.length >= 16;
+    }
+
+    const previous = normalizeSentence(last.text);
+    if (!content.startsWith(previous)) {
+      return true;
+    }
+
+    const wordDelta = Math.max(0, countWords(content) - countWords(previous));
+    const charDelta = Math.max(0, content.length - previous.length);
+    return wordDelta >= INCREMENTAL_TRANSLATE_MIN_WORD_DELTA || charDelta >= 28;
+  };
+
   const scheduleIncrementalTranslation = (lineId: string, text: string) => {
+    if (!shouldTranslateIncrementally(lineId, text)) {
+      return;
+    }
+
     incrementalPendingRef.current = { lineId, text };
     if (incrementalTranslateTimerRef.current !== null) {
       return;
@@ -313,6 +402,7 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
       }
 
       enqueueLineTranslation(pending.lineId, pending.text);
+      lastIncrementalTranslationRef.current = pending;
       incrementalPendingRef.current = null;
     }, INCREMENTAL_TRANSLATE_DEBOUNCE_MS);
   };
@@ -326,25 +416,16 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
     }
 
     const targetLineId =
-      inProgressLineIdRef.current ??
+      activeLineIdRef.current ??
       findReusableLastLineId(content) ??
       createId();
-    inProgressLineIdRef.current = targetLineId;
-    setLines((prev) => {
-      const index = prev.findIndex((line) => line.id === targetLineId);
-      if (index >= 0) {
-        const updated = [...prev];
-        updated[index] = { ...updated[index], original: content };
-        return updated;
-      }
-
-      return [...prev, { id: targetLineId, original: content, translated: '' }];
-    });
+    activeLineIdRef.current = targetLineId;
+    upsertTranscriptLine(targetLineId, content);
 
     enqueueLineTranslation(targetLineId, content);
     markRecentFinal(content);
 
-    inProgressLineIdRef.current = null;
+    activeLineIdRef.current = null;
     latestInProgressTextRef.current = '';
     clearPauseFinalizeTimer();
     clearIncrementalTranslateTimer();
@@ -373,20 +454,11 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
     }
 
     const nextInProgressLineId =
-      inProgressLineIdRef.current ??
+      activeLineIdRef.current ??
       findReusableLastLineId(content) ??
       createId();
-    inProgressLineIdRef.current = nextInProgressLineId;
-    setLines((prev) => {
-      const index = prev.findIndex((line) => line.id === nextInProgressLineId);
-      if (index >= 0) {
-        const updated = [...prev];
-        updated[index] = { ...updated[index], original: content };
-        return updated;
-      }
-
-      return [...prev, { id: nextInProgressLineId, original: content, translated: '' }];
-    });
+    activeLineIdRef.current = nextInProgressLineId;
+    upsertTranscriptLine(nextInProgressLineId, content);
     latestInProgressTextRef.current = content;
     lastPartialUpdateAtRef.current = Date.now();
 
@@ -410,7 +482,7 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
       return;
     }
 
-    if (!inProgressLineIdRef.current && linesRef.current.length > 0) {
+    if (!activeLineIdRef.current && linesRef.current.length > 0) {
       const lastLine = linesRef.current[linesRef.current.length - 1];
       const lastOriginal = normalizeSentence(lastLine.original);
       const recentFinal = recentFinalRef.current.text;
@@ -418,11 +490,16 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
       const shouldMergeIntoLast =
         content.startsWith(lastOriginal) ||
         lastOriginal.startsWith(content) ||
+        commonPrefixWords(content, lastOriginal) >= 4 ||
         (recentlyFinalized &&
-          (content.startsWith(recentFinal) || recentFinal.startsWith(content)));
+          (
+            content.startsWith(recentFinal) ||
+            recentFinal.startsWith(content) ||
+            commonPrefixWords(content, recentFinal) >= 4
+          ));
 
       if (shouldMergeIntoLast) {
-        inProgressLineIdRef.current = lastLine.id;
+        activeLineIdRef.current = lastLine.id;
       }
     }
 
@@ -437,9 +514,6 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
 
   useEffect(() => {
     const loadSettings = async () => {
-      const provider = (await window.appApi.store.get('sttProvider')) as string | undefined;
-      const openaiKey = await window.appApi.providerKey.getDecrypted('openai');
-      const qwenKey = await window.appApi.providerKey.getDecrypted('qwen');
       const aliKey = (await window.appApi.store.get('aliyunApiKey')) as string | undefined;
 
       const enabled = (await window.appApi.store.get('translationEnabled')) as boolean | undefined;
@@ -448,13 +522,10 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
       const config = await window.appApi.providerConfig.get();
       const qwenConfig = config.providers.qwen;
 
-      setSttProvider(provider ?? 'aliyun');
-      setOpenaiSttApiKey(openaiKey);
       setAliyunApiKey(aliKey ?? '');
 
       setTranslationEnabled(enabled ?? true);
       setTranslationTargetLanguage(targetLang ?? 'English');
-      setQwenApiKey(qwenKey);
       setQwenBaseUrl(qwenConfig.baseUrl);
       setQwenModel(qwenConfig.model);
     };
@@ -474,6 +545,12 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
     });
 
     const offAliyunError = window.appApi.stt.onAliyunError((message) => {
+      void window.appApi.stt.stopAliyun();
+      stopAliyunCapture();
+      stopVoiceMonitor();
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+      setIsRecording(false);
       setStatus(`Aliyun STT error: ${message}`);
     });
 
@@ -481,12 +558,13 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
       offAliyunResult();
       offAliyunError();
       clearPauseFinalizeTimer();
-      clearIncrementalTranslateTimer();
+      activeLineIdRef.current = null;
+      resetTranslationQueue();
       stopVoiceMonitor();
       stopAliyunCapture();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [translationEnabled, translationTargetLanguage, qwenApiKey, qwenBaseUrl, qwenModel]);
+  }, [translationEnabled, translationTargetLanguage, aliyunApiKey, qwenBaseUrl, qwenModel]);
 
   useEffect(() => {
     if (!transcriptScrollRef.current) {
@@ -522,7 +600,7 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
         translated: ''
       }));
 
-      setLines((prev) => [...prev, ...appended]);
+      setTranscriptLines((prev) => [...prev, ...appended]);
       appended.forEach((line) => {
         enqueueLineTranslation(line.id, line.original);
       });
@@ -534,24 +612,7 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
       window.removeEventListener('paste', handlePaste);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [translationEnabled, translationTargetLanguage, qwenApiKey, qwenBaseUrl, qwenModel]);
-
-  useEffect(() => {
-    const payload = externalSelectionPayload;
-    if (!payload?.original?.trim()) {
-      return;
-    }
-
-    setLines((prev) => [
-      ...prev,
-      {
-        id: createId(),
-        original: payload.original.trim(),
-        translated: payload.translated?.trim() ?? ''
-      }
-    ]);
-    setStatus('Inserted selected text from external app.');
-  }, [externalSelectionPayload, externalSelectionVersion]);
+  }, [translationEnabled, translationTargetLanguage, aliyunApiKey, qwenBaseUrl, qwenModel]);
 
   const stopAliyunCapture = () => {
     aliyunProcessorRef.current?.disconnect();
@@ -652,12 +713,12 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
   };
 
   const translateText = async (text: string): Promise<string> => {
-    if (!translationEnabled || !qwenApiKey) {
+    if (!translationEnabled || !aliyunApiKey) {
       return '';
     }
 
     const translator = new QwenTranslateService({
-      apiKey: qwenApiKey,
+      apiKey: aliyunApiKey,
       baseUrl: qwenBaseUrl,
       model: qwenModel
     });
@@ -671,8 +732,8 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
   };
 
   const translateSelectedText = async (text: string): Promise<string> => {
-    if (!qwenApiKey) {
-      return 'Please set Translation API Key in Settings first.';
+    if (!aliyunApiKey) {
+      return 'Please set the Aliyun DashScope API Key in Settings first.';
     }
 
     const cached = selectionTranslationCacheRef.current.get(text);
@@ -681,7 +742,7 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
     }
 
     const translator = new QwenTranslateService({
-      apiKey: qwenApiKey,
+      apiKey: aliyunApiKey,
       baseUrl: qwenBaseUrl,
       model: qwenModel
     });
@@ -756,6 +817,11 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
   };
 
   const startRecording = async () => {
+    if (!aliyunApiKey.trim()) {
+      alert('Please set your Aliyun DashScope API Key in Settings > Speech first.');
+      return;
+    }
+
     const previousLines = linesRef.current.filter((line) => line.original.trim().length > 0);
     if (previousLines.length > 0) {
       const now = new Date();
@@ -772,94 +838,51 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
       await window.appApi.store.set('transcriptHistory', next);
     }
 
-    setLines([]);
+    setTranscriptLines(() => []);
     setStatus('');
-    inProgressLineIdRef.current = null;
+    activeLineIdRef.current = null;
     latestInProgressTextRef.current = '';
     lastPartialUpdateAtRef.current = 0;
     isSpeakingRef.current = false;
-    translationInFlightRef.current = false;
-    queuedTranslationRef.current = null;
     clearPauseFinalizeTimer();
-    clearIncrementalTranslateTimer();
+    resetTranslationQueue();
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       streamRef.current = stream;
       startVoiceMonitor(stream);
 
-      if (sttProvider === 'aliyun') {
-        if (!aliyunApiKey.trim()) {
-          alert('Please set your Aliyun API Key in Settings > Speech first.');
-          return;
-        }
-
-        setStatus('Starting Aliyun Paraformer realtime...');
-        await window.appApi.stt.startAliyun(aliyunApiKey.trim(), 'paraformer-realtime-v2');
-        startAliyunCapture(stream);
-        inProgressLineIdRef.current = null;
-        setIsRecording(true);
-        setStatus('Speak now.');
-        return;
-      }
-
-      if (!openaiSttApiKey) {
-        alert('Please set your OpenAI API Key in Settings > Speech first.');
-        return;
-      }
-
-      setStatus('Listening...');
-      const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-      mediaRecorderRef.current = recorder;
-
-      recorder.ondataavailable = async (event) => {
-        if (event.data.size > 0) {
-          setIsProcessing(true);
-          try {
-            const audioBuffer = await event.data.arrayBuffer();
-            let binary = '';
-            const bytes = new Uint8Array(audioBuffer);
-            for (let i = 0; i < bytes.byteLength; i += 1) {
-              binary += String.fromCharCode(bytes[i]);
-            }
-            const audioBase64 = btoa(binary);
-
-            const text = await window.appApi.stt.transcribeOpenAi(audioBase64, event.data.type || 'audio/webm', 'zh');
-            if (text && text.trim().length > 0) {
-              commitRecognizedSentence(text);
-            }
-          } catch (error) {
-            const message = error instanceof Error ? error.message : 'Unknown error';
-            setStatus(`STT failed: ${message}`);
-          } finally {
-            setIsProcessing(false);
-          }
-        }
-      };
-
-      recorder.start(3000);
+      setStatus('Starting Aliyun Paraformer realtime...');
+      await window.appApi.stt.startAliyun(aliyunApiKey.trim(), 'paraformer-realtime-v2');
+      startAliyunCapture(stream);
+      activeLineIdRef.current = null;
       setIsRecording(true);
+      setStatus('Speak now.');
     } catch (err) {
       console.error('Error accessing microphone:', err);
-      alert('Could not access microphone. Please check permissions.');
+      void window.appApi.stt.stopAliyun();
+      stopAliyunCapture();
+      stopVoiceMonitor();
+      streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+      const message = err instanceof Error ? err.message : 'Unknown error';
+      setStatus(`Recording failed: ${message}`);
+      alert('Could not start recording. Check the Aliyun key, network, and microphone permission.');
     }
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current && isRecording) {
-      mediaRecorderRef.current.stop();
-    }
-
     void window.appApi.stt.stopAliyun();
     stopAliyunCapture();
     stopVoiceMonitor();
-    inProgressLineIdRef.current = null;
+    activeLineIdRef.current = null;
     latestInProgressTextRef.current = '';
     clearPauseFinalizeTimer();
-    clearIncrementalTranslateTimer();
+    resetTranslationQueue();
 
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
     }
 
     setIsRecording(false);
@@ -933,13 +956,6 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
             )}
           </div>
         ))}
-
-        {isProcessing && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#cbd5e1', fontSize: '14px' }}>
-            <Loader2 className="animate-spin" size={16} />
-            <span>Processing chunk...</span>
-          </div>
-        )}
 
         {status && <div style={{ color: '#cbd5e1', fontSize: '13px' }}>{status}</div>}
 
@@ -1044,13 +1060,6 @@ const Home: React.FC<HomeProps> = ({ externalSelectionPayload, externalSelection
       </div>
 
       <style>{`
-        @keyframes spin {
-          from { transform: rotate(0deg); }
-          to { transform: rotate(360deg); }
-        }
-        .animate-spin {
-          animation: spin 1s linear infinite;
-        }
         @keyframes wavePulse {
           0% {
             transform: scale(0.92);

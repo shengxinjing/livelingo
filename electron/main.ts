@@ -1,5 +1,5 @@
-import { app, BrowserWindow, clipboard, globalShortcut, ipcMain, safeStorage, screen } from 'electron';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { app, BrowserWindow, clipboard, globalShortcut, ipcMain, safeStorage, shell } from 'electron';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import Store from 'electron-store';
 import { execFile } from 'node:child_process';
@@ -18,6 +18,7 @@ import {
 type PersistedState = {
   providerConfig?: ProviderConfigState;
   apiKeys?: Partial<Record<ProviderId, string>>;
+  aliyunApiKey?: string;
   translationTargetLanguage?: string;
   textAssist?: TextAssistConfig;
 };
@@ -33,9 +34,6 @@ type TextAssistConfig = {
   selection: {
     enableClipboardFallback: boolean;
   };
-  bubble: {
-    enabled: boolean;
-  };
 };
 
 type TextAssistStatus = {
@@ -44,18 +42,6 @@ type TextAssistStatus = {
   activeHotkey: string;
   mode: 'triple-space' | 'hotkey';
   lastError: string;
-};
-
-type ExternalSelectionPayload = {
-  original: string;
-  translated: string;
-  capturedAt: string;
-};
-
-type OpenAiTranscribeRequest = {
-  audioBase64: string;
-  mimeType?: string;
-  language?: string;
 };
 
 const store = new Store<PersistedState>();
@@ -75,6 +61,7 @@ process.env.VITE_PUBLIC = VITE_DEV_SERVER_URL
 let win: BrowserWindow | null;
 const aliyunClients = new Map<number, AliyunRealtimeClient>();
 const appIconPath = path.join(process.env.VITE_PUBLIC, 'live-lingo', 'web', 'icon-512.png');
+const ALIYUN_API_KEY_URL = 'https://bailian.console.aliyun.com/cn-beijing/?tab=app#/api-key';
 const DEFAULT_TEXT_ASSIST_CONFIG: TextAssistConfig = {
   enabled: true,
   debugLogging: false,
@@ -85,9 +72,6 @@ const DEFAULT_TEXT_ASSIST_CONFIG: TextAssistConfig = {
   },
   selection: {
     enableClipboardFallback: true
-  },
-  bubble: {
-    enabled: true
   }
 };
 
@@ -96,11 +80,11 @@ let textAssistLastError = '';
 let textAssistRunning = false;
 let textAssistQueued = false;
 let lastTextAssistSnapshot: { original: string; translated: string; at: number } | null = null;
-let selectionBubbleWindow: BrowserWindow | null = null;
-let selectionMonitorTimer: NodeJS.Timeout | null = null;
-let selectionMonitorInFlight = false;
-let lastSelectionDigest = '';
-let pendingSelectionText = '';
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) {
+  app.quit();
+}
 
 function createWindow() {
   const initialAlwaysOnTop = Boolean(store.get('windowAlwaysOnTop', false));
@@ -133,260 +117,6 @@ function createWindow() {
   }
 
   win.center();
-}
-
-function createSelectionBubbleWindow() {
-  if (selectionBubbleWindow && !selectionBubbleWindow.isDestroyed()) {
-    return selectionBubbleWindow;
-  }
-
-  const logoPath = path.join(process.env.VITE_PUBLIC, 'logo.png');
-  const logoUrl = pathToFileURL(logoPath).toString();
-  const html = `
-    <html>
-      <head>
-        <meta charset="UTF-8" />
-        <style>
-          html, body {
-            margin: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background: transparent;
-          }
-          #bubble {
-            all: unset;
-            width: 52px;
-            height: 52px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: rgba(15, 23, 42, 0.86);
-            border: 1px solid rgba(148, 163, 184, 0.5);
-            box-shadow: 0 8px 22px rgba(15, 23, 42, 0.35);
-            cursor: pointer;
-          }
-          #bubble img {
-            width: 26px;
-            height: 26px;
-            object-fit: contain;
-          }
-        </style>
-      </head>
-      <body>
-        <button id="bubble" title="Open LiveLingo">
-          <img src="${logoUrl}" alt="LiveLingo" />
-        </button>
-        <script>
-          const { ipcRenderer } = require('electron');
-          document.getElementById('bubble').addEventListener('click', () => {
-            ipcRenderer.send('selection-bubble:clicked');
-          });
-        </script>
-      </body>
-    </html>
-  `;
-
-  selectionBubbleWindow = new BrowserWindow({
-    width: 52,
-    height: 52,
-    frame: false,
-    transparent: true,
-    resizable: false,
-    movable: false,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    skipTaskbar: true,
-    show: false,
-    hasShadow: false,
-    alwaysOnTop: true,
-    backgroundColor: '#00000000',
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false
-    }
-  });
-
-  selectionBubbleWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  selectionBubbleWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
-
-  selectionBubbleWindow.on('closed', () => {
-    selectionBubbleWindow = null;
-  });
-
-  return selectionBubbleWindow;
-}
-
-function hideSelectionBubble() {
-  if (!selectionBubbleWindow || selectionBubbleWindow.isDestroyed()) {
-    return;
-  }
-  selectionBubbleWindow.hide();
-}
-
-function showSelectionBubbleNearCursor() {
-  const bubble = createSelectionBubbleWindow();
-  const point = screen.getCursorScreenPoint();
-  const offset = 14;
-  bubble.setPosition(point.x + offset, point.y + offset, false);
-  bubble.showInactive();
-}
-
-async function getFrontmostAppName(): Promise<string> {
-  try {
-    const output = await runAppleScript(`
-      tell application "System Events"
-        name of first application process whose frontmost is true
-      end tell
-    `);
-    return output.trim();
-  } catch {
-    return '';
-  }
-}
-
-async function getFrontmostSelectedText(): Promise<string> {
-  try {
-    const output = await runAppleScript(`
-      tell application "System Events"
-        tell (first application process whose frontmost is true)
-          try
-            set focusedElement to value of attribute "AXFocusedUIElement"
-            set selectedText to value of attribute "AXSelectedText" of focusedElement
-            if selectedText is missing value then
-              return ""
-            end if
-            return selectedText
-          on error
-            return ""
-          end try
-        end tell
-      end tell
-    `);
-    return output.trim();
-  } catch {
-    return '';
-  }
-}
-
-function dispatchExternalSelection(payload: ExternalSelectionPayload) {
-  if (!win || win.isDestroyed()) {
-    createWindow();
-  }
-  if (!win) {
-    return;
-  }
-
-  const send = () => {
-    win?.webContents.send('external-selection:translated', payload);
-  };
-
-  if (win.isMinimized()) {
-    win.restore();
-  }
-  win.show();
-  win.focus();
-
-  if (win.webContents.isLoadingMainFrame()) {
-    win.webContents.once('did-finish-load', send);
-  } else {
-    send();
-  }
-}
-
-async function handleSelectionBubbleClick() {
-  const source = pendingSelectionText.trim();
-  hideSelectionBubble();
-  if (!source) {
-    return;
-  }
-
-  try {
-    const translated = await translateWithQwen(source);
-    dispatchExternalSelection({
-      original: source,
-      translated,
-      capturedAt: new Date().toISOString()
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    textAssistDebugLog('external-selection:translate-error', { message });
-  } finally {
-    pendingSelectionText = '';
-  }
-}
-
-async function runSelectionMonitorTick() {
-  if (selectionMonitorInFlight) {
-    return;
-  }
-  selectionMonitorInFlight = true;
-  try {
-    const config = readTextAssistConfig();
-    if (!config.enabled || !config.bubble.enabled) {
-      hideSelectionBubble();
-      return;
-    }
-
-    const frontApp = await getFrontmostAppName();
-    if (!frontApp || frontApp.toLowerCase().includes('livelingo')) {
-      hideSelectionBubble();
-      return;
-    }
-
-    const selected = (await getFrontmostSelectedText()).trim();
-    if (!selected) {
-      hideSelectionBubble();
-      pendingSelectionText = '';
-      lastSelectionDigest = '';
-      return;
-    }
-
-    const digest = `${frontApp}::${selected}`;
-    if (digest === lastSelectionDigest) {
-      return;
-    }
-
-    lastSelectionDigest = digest;
-    pendingSelectionText = selected;
-    showSelectionBubbleNearCursor();
-    textAssistDebugLog('external-selection:bubble-shown', {
-      frontApp,
-      length: selected.length
-    });
-  } finally {
-    selectionMonitorInFlight = false;
-  }
-}
-
-function startSelectionMonitor() {
-  if (selectionMonitorTimer) {
-    return;
-  }
-  selectionMonitorTimer = setInterval(() => {
-    void runSelectionMonitorTick();
-  }, 700);
-}
-
-function stopSelectionMonitor() {
-  if (selectionMonitorTimer) {
-    clearInterval(selectionMonitorTimer);
-    selectionMonitorTimer = null;
-  }
-  hideSelectionBubble();
-  pendingSelectionText = '';
-  lastSelectionDigest = '';
-}
-
-function refreshSelectionMonitor() {
-  stopSelectionMonitor();
-  const config = readTextAssistConfig();
-  if (!config.enabled || !config.bubble.enabled) {
-    return;
-  }
-  startSelectionMonitor();
 }
 
 function encryptApiKey(value: string): string {
@@ -473,9 +203,6 @@ function normalizeTextAssistConfig(input?: Partial<TextAssistConfig>): TextAssis
     selection: {
       enableClipboardFallback:
         input.selection?.enableClipboardFallback ?? DEFAULT_TEXT_ASSIST_CONFIG.selection.enableClipboardFallback
-    },
-    bubble: {
-      enabled: input.bubble?.enabled ?? DEFAULT_TEXT_ASSIST_CONFIG.bubble.enabled
     }
   };
 }
@@ -514,10 +241,9 @@ function getTextAssistStatus(): TextAssistStatus {
 }
 
 async function translateWithQwen(text: string): Promise<string> {
-  const encrypted = getStoredApiKeys().qwen ?? '';
-  const apiKey = decryptApiKey(encrypted).trim();
+  const apiKey = store.get('aliyunApiKey', '').trim();
   if (!apiKey) {
-    throw new Error('Qwen translation key is missing. Save it in Settings > Translation.');
+    throw new Error('Aliyun DashScope API key is missing. Save it in Settings > Speech.');
   }
 
   const config = readProviderConfig();
@@ -946,13 +672,19 @@ ipcMain.handle('window:get-always-on-top', async (event) => {
   return targetWindow.isAlwaysOnTop();
 });
 
+ipcMain.handle('window:open-aliyun-api-key-page', async () => {
+  await shell.openExternal(ALIYUN_API_KEY_URL);
+  return true;
+});
+
 ipcMain.handle('window:close', async (event) => {
   const targetWindow = BrowserWindow.fromWebContents(event.sender);
   if (!targetWindow) {
     return false;
   }
 
-  targetWindow.close();
+  // Minimize to dock instead of closing window/process.
+  targetWindow.minimize();
   return true;
 });
 
@@ -963,7 +695,6 @@ ipcMain.handle('text-assist:get-config', async () => {
 ipcMain.handle('text-assist:save-config', async (_event, config: Partial<TextAssistConfig>) => {
   const saved = saveTextAssistConfig(config);
   registerTextAssistHotkey();
-  refreshSelectionMonitor();
   return saved;
 });
 
@@ -992,22 +723,36 @@ ipcMain.handle('text-assist:open-accessibility-settings', async () => {
 });
 
 ipcMain.handle('aliyun-stt:start', async (event, apiKey: string, model?: string) => {
+  const normalizedApiKey = apiKey.trim();
+  if (!normalizedApiKey) {
+    throw new Error('Aliyun DashScope API key is required.');
+  }
+
   const senderId = event.sender.id;
   const current = aliyunClients.get(senderId);
   current?.stop();
+  aliyunClients.delete(senderId);
 
   const client = new AliyunRealtimeClient(
-    { apiKey, model },
+    { apiKey: normalizedApiKey, model },
     ({ text, isFinal }) => {
       event.sender.send('aliyun-stt:result', { text, isFinal });
     },
     (error) => {
+      if (aliyunClients.get(senderId) === client) {
+        aliyunClients.delete(senderId);
+      }
       event.sender.send('aliyun-stt:error', error.message);
     }
   );
 
-  aliyunClients.set(senderId, client);
-  await client.start();
+  try {
+    await client.start();
+    aliyunClients.set(senderId, client);
+  } catch (error) {
+    client.stop();
+    throw error;
+  }
   return true;
 });
 
@@ -1032,44 +777,6 @@ ipcMain.handle('aliyun-stt:stop', async (event) => {
   return true;
 });
 
-ipcMain.handle('stt:transcribe-openai', async (_event, request: OpenAiTranscribeRequest) => {
-  const encrypted = getStoredApiKeys().openai ?? '';
-  const apiKey = decryptApiKey(encrypted);
-
-  if (!apiKey) {
-    throw new Error('OpenAI key is missing. Save it in Settings.');
-  }
-
-  const audioBuffer = Buffer.from(request.audioBase64, 'base64');
-  const audioBlob = new Blob([audioBuffer], { type: request.mimeType ?? 'audio/webm' });
-  const formData = new FormData();
-  formData.append('file', audioBlob, 'audio.webm');
-  formData.append('model', 'whisper-1');
-  if (request.language?.trim()) {
-    formData.append('language', request.language.trim());
-  }
-
-  const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`
-    },
-    body: formData
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`OpenAI STT failed (${response.status}): ${errorText.slice(0, 180)}`);
-  }
-
-  const payload = (await response.json()) as { text?: string };
-  if (!payload.text?.trim()) {
-    throw new Error('OpenAI STT returned empty text.');
-  }
-
-  return payload.text;
-});
-
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit();
@@ -1079,13 +786,23 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   unregisterTextAssistHotkey();
-  stopSelectionMonitor();
 });
 
 app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
+  const windows = BrowserWindow.getAllWindows();
+  if (windows.length === 0) {
     createWindow();
+    return;
   }
+
+  const mainWindow = win && !win.isDestroyed() ? win : windows[0];
+  if (mainWindow?.isMinimized()) {
+    mainWindow.restore();
+  }
+  if (!mainWindow?.isVisible()) {
+    mainWindow?.show();
+  }
+  mainWindow?.focus();
 });
 
 app.on('web-contents-created', (_evt, contents) => {
@@ -1104,10 +821,22 @@ app.whenReady().then(() => {
     app.dock.setIcon(appIconPath);
   }
   registerTextAssistHotkey();
-  refreshSelectionMonitor();
   createWindow();
 });
 
-ipcMain.on('selection-bubble:clicked', () => {
-  void handleSelectionBubbleClick();
+app.on('second-instance', () => {
+  const windows = BrowserWindow.getAllWindows();
+  const mainWindow = win && !win.isDestroyed() ? win : windows[0];
+  if (!mainWindow) {
+    createWindow();
+    return;
+  }
+
+  if (mainWindow.isMinimized()) {
+    mainWindow.restore();
+  }
+  if (!mainWindow.isVisible()) {
+    mainWindow.show();
+  }
+  mainWindow.focus();
 });

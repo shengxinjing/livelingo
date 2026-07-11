@@ -19,6 +19,7 @@ const bridgeApi = {
   windowControl: {
     setAlwaysOnTop: (value: boolean): Promise<boolean> => ipcRenderer.invoke('window:set-always-on-top', value),
     getAlwaysOnTop: (): Promise<boolean> => ipcRenderer.invoke('window:get-always-on-top'),
+    openAliyunApiKeyPage: (): Promise<boolean> => ipcRenderer.invoke('window:open-aliyun-api-key-page'),
     close: (): Promise<boolean> => ipcRenderer.invoke('window:close')
   },
   textAssist: {
@@ -27,16 +28,6 @@ const bridgeApi = {
     getStatus: () => ipcRenderer.invoke('text-assist:get-status'),
     runOnce: () => ipcRenderer.invoke('text-assist:run-once'),
     openAccessibilitySettings: () => ipcRenderer.invoke('text-assist:open-accessibility-settings')
-  },
-  externalSelection: {
-    onTranslated: (listener: (payload: { original: string; translated: string; capturedAt: string }) => void) => {
-      const wrapped = (
-        _event: Electron.IpcRendererEvent,
-        payload: { original: string; translated: string; capturedAt: string }
-      ) => listener(payload);
-      ipcRenderer.on('external-selection:translated', wrapped);
-      return () => ipcRenderer.off('external-selection:translated', wrapped);
-    }
   },
   providerConfig: {
     get: (): Promise<ProviderConfigState> => ipcRenderer.invoke('provider-config:get'),
@@ -54,16 +45,6 @@ const bridgeApi = {
       ipcRenderer.invoke('provider-key:get-decrypted', providerId)
   },
   stt: {
-    transcribeOpenAi: (
-      audioBase64: string,
-      mimeType: string,
-      language?: string
-    ): Promise<string> =>
-      ipcRenderer.invoke('stt:transcribe-openai', {
-        audioBase64,
-        mimeType,
-        language
-      }),
     startAliyun: (apiKey: string, model?: string): Promise<boolean> =>
       ipcRenderer.invoke('aliyun-stt:start', apiKey, model),
     sendAliyunAudio: (bytes: number[]): Promise<boolean> =>

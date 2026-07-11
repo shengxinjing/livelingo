@@ -19,9 +19,6 @@ declare global {
     selection: {
       enableClipboardFallback: boolean;
     };
-    bubble: {
-      enabled: boolean;
-    };
   };
 
   type TextAssistRunResult = {
@@ -39,12 +36,6 @@ declare global {
     lastError: string;
   };
 
-  type ExternalSelectionPayload = {
-    original: string;
-    translated: string;
-    capturedAt: string;
-  };
-
   interface Window {
     appApi: {
       onMainMessage: (listener: (message: string) => void) => () => void;
@@ -55,6 +46,7 @@ declare global {
       windowControl: {
         setAlwaysOnTop: (value: boolean) => Promise<boolean>;
         getAlwaysOnTop: () => Promise<boolean>;
+        openAliyunApiKeyPage: () => Promise<boolean>;
         close: () => Promise<boolean>;
       };
       textAssist: {
@@ -63,9 +55,6 @@ declare global {
         getStatus: () => Promise<TextAssistStatus>;
         runOnce: () => Promise<TextAssistRunResult>;
         openAccessibilitySettings: () => Promise<boolean>;
-      };
-      externalSelection: {
-        onTranslated: (listener: (payload: ExternalSelectionPayload) => void) => () => void;
       };
       providerConfig: {
         get: () => Promise<ProviderConfigState>;
@@ -79,7 +68,6 @@ declare global {
         getDecrypted: (providerId: ProviderId) => Promise<string>;
       };
       stt: {
-        transcribeOpenAi: (audioBase64: string, mimeType: string, language?: string) => Promise<string>;
         startAliyun: (apiKey: string, model?: string) => Promise<boolean>;
         sendAliyunAudio: (bytes: number[]) => Promise<boolean>;
         stopAliyun: () => Promise<boolean>;

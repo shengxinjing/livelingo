@@ -36,7 +36,7 @@ sudo chown -R $(id -u):$(id -g) ~/.npm
 npm run dev
 ```
 
-> 说明：项目目前的 `dev` 脚本是 Vite 前端开发模式。Electron 主进程由项目现有联调方式启动（按你当前本地流程运行）。
+> `npm run dev` 会同时启动 Vite 和 Electron 开发窗口。
 
 ### 3. 构建
 
@@ -49,13 +49,15 @@ npm run build
 在应用 `Settings` 页面可配置：
 
 - `Speech`
-  - STT Provider（Aliyun / OpenAI）
-  - Aliyun API Key
-  - OpenAI API Key
+  - Aliyun DashScope API Key
+  - 该 Key 同时用于 Paraformer 实时语音识别、通义翻译和 Text Assist
 - `Translation`
-  - Qwen API Key
   - 目标语言
   - 翻译开关
+- `Text Assist`
+  - 全局快捷键
+  - 选中文本或输入框全文翻译替换
+  - macOS 辅助功能权限状态与测试
 
 ## 项目结构
 
@@ -71,14 +73,15 @@ livelingo/
 └── electron-builder.json5   # 打包配置
 ```
 
-## Roadmap（已规划）
+## 当前状态
 
 详见 `todo.md`：
 
-- 任意应用选中文本 -> logo 浮标 -> 打开主窗口展示翻译
-- 任意输入框三击空格（或快捷键）触发翻译替换
-- 支持 `Cmd/Ctrl+Z` 撤销
-- Text Assist 设置页与权限管理
+- 阿里 Paraformer 实时语音识别
+- 通义 Qwen 增量翻译
+- 粘贴文本并按行翻译
+- Text Assist 快捷键翻译替换
+- 支持 `Cmd/Ctrl+Z` 撤销 Text Assist 替换
 
 ## 许可证
 
